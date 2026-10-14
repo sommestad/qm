@@ -69,6 +69,7 @@ import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { SlackInstallationStore, SlackSocketAppIdReader } from "../surfaces/slack-installation.ts";
 
 export interface ServerDeps {
+  slackBriefingCards?: boolean;
   production?: boolean;
   allowUnauthenticatedCore?: boolean;
   signingSecret?: string;

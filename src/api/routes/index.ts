@@ -17,6 +17,7 @@ import { fileUploadRoutes } from "./file-uploads.ts";
 import { surfaceRoutes } from "./surface.ts";
 import { cronRoutes } from "./crons.ts";
 import { loopRoutes } from "./loops.ts";
+import { briefingCardRoutes } from "./briefing-cards.ts";
 import { reachRoutes } from "./reach.ts";
 import { directoryRoutes } from "./directory.ts";
 import { contextRoutes } from "./context.ts";
@@ -70,6 +71,7 @@ export const apiRoutes: ReadonlyArray<Route<ApiCtx>> = [
   ...cronRoutes,
   ...loopRoutes,
   ...reachRoutes,
+  ...briefingCardRoutes,
   ...webhookRoutes,
   ...directoryRoutes,
   ...contextRoutes,

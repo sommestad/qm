@@ -1,3 +1,4 @@
+import { createBriefingCardActions } from "./briefing-card-actions.ts";
 import { errMessage, swallow, swallowAs } from "../util/errors.ts";
 import { createEnvelopeStaging } from "./envelope-staging.ts";
 import { createSweeper } from "../util/sweeper.ts";
@@ -271,6 +272,17 @@ export async function startSlackPlugin(
     ensureHeader,
   });
   approvals.registerActions(app);
+  if (ACCOUNT_LABEL === "default") {
+    const briefing = createBriefingCardActions({
+      core,
+      directory,
+      client: app.client,
+      teamId: () => ids.ownTeamId,
+      botUserId: () => ids.botUserId,
+      ...(allowActor ? { allowActor } : {}),
+    });
+    app.action(/^briefing_/, briefing.handle);
+  }
   const inboxMessage = (
     client: unknown,
     msg: { channel: string; ts: string; threadTs?: string; text?: string; senderSlackId?: string },

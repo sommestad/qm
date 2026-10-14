@@ -407,6 +407,17 @@ const FAMILIES: AgentApiFamily[] = [
     ],
   },
   {
+    match: onPath("POST", "/v1/briefing-cards"),
+    routes: [
+      {
+        method: "POST",
+        path: "/v1/briefing-cards",
+        summary:
+          "Opt-in personal DM: post {title, summary, sourceUrl} as a Slack card with source and draft-in-thread buttons. Use native Slack reactions (✅ done, ⭐ important), not task state or message rewrites. Drafts use the card summary only and cannot re-read sources. Re-read actual sources each day. Returns a Slack receipt only after confirmed delivery; ambiguous failures must not be automatically retried.",
+      },
+    ],
+  },
+  {
     match: onPath("POST", "/v1/reach"),
     routes: [
       {

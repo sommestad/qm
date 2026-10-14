@@ -2232,6 +2232,7 @@ export function serverDeps(
     slackInstallation: built.slackInstallation,
     slackEnvironmentState,
     ...(config.slackEventsPort ? { slackEventsPort: config.slackEventsPort } : {}),
+    slackBriefingCards: config.slackBriefingCards,
     ...(slackEnvBotToken ? { slackEnvBotToken } : {}),
     resolveClient: built.resolveClient,
     consentLinks: built.consentLinks,
