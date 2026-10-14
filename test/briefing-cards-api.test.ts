@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { briefingCardRoutes, postBriefingCard } from "../src/api/routes/briefing-cards.ts";
+import { briefingCardRoutes, postBriefingCard, briefingBotToken } from "../src/api/routes/briefing-cards.ts";
 import type { ApiCtx } from "../src/api/routes/route.ts";
 import { createDirectoryStore } from "../src/directory/directory-store.ts";
 
@@ -15,6 +15,8 @@ async function request(
     member?: boolean;
     body?: unknown;
     limited?: boolean;
+    botActor?: boolean;
+    noBot?: boolean;
   } = {},
 ) {
   const directory = createDirectoryStore();
@@ -28,13 +30,14 @@ async function request(
       url: new URL("http://localhost/v1/briefing-cards"),
       body: options.body ?? INPUT,
       capability: {
+        botActor: options.botActor,
         actorId: options.owner ?? "reviewer",
         scopeId: options.scope ?? "personal:reviewer",
         exp: Date.now() + 60_000,
       },
       deps: {
         slackBriefingCards: options.enabled !== false,
-        slackEnvBotToken: "never-used-in-validation-tests",
+        slackEnvBotToken: options.noBot ? undefined : "never-used-in-validation-tests",
         directory,
         rateLimiter: options.limited ? { check: async () => ({ allowed: false }) } : undefined,
       },
@@ -60,6 +63,8 @@ test("API denies shared/foreign scopes and unknown principals before Slack I/O",
 });
 test("disabled feature, invalid input and rate limit fail before Slack I/O", async () => {
   assert.equal(await request({ enabled: false }), 503);
+  assert.equal(await request({ noBot: true }), 503);
+  assert.equal(await request({ botActor: true }), 403);
   assert.equal(await request({ body: { ...INPUT, sourceUrl: "javascript:alert(1)" } }), 400);
   assert.equal(await request({ limited: true }), 429);
 });
@@ -77,8 +82,8 @@ function slackFixture() {
   const channel = { id: "D1", is_im: true, user: "U1" };
   const client = {
     auth: { test: async () => ({ ok: true, team_id: "T1" }) },
-    users: { lookupByEmail: async () => ({ user: member }), info: async () => ({ user: member }) },
-    conversations: { open: async () => ({ channel }), info: async () => ({ channel }) },
+    users: { lookupByEmail: async () => ({ user: member }), info: async () => ({ ok: true, user: member }) },
+    conversations: { open: async () => ({ channel }), info: async () => ({ ok: true, channel }) },
     chat: {
       postMessage: async (p: any) => {
         posts.push(p);
@@ -132,4 +137,60 @@ test("ambiguous Slack post is not retried", async () => {
 test("no GET endpoint or saved task-state contract", () => {
   assert.equal(briefingCardRoutes.length, 1);
   assert.equal((briefingCardRoutes[0] as any).method, "POST");
+});
+
+test("managed bot installation is preferred over environment fallback", async () => {
+  const deps = {
+    slackEnvBotToken: "env-token",
+    slackInstallation: {
+      status: async () => ({ configured: true, managed: true }),
+      get: async () => ({ botToken: "managed-token" }),
+    },
+  } as any;
+  assert.equal(await briefingBotToken(deps), "managed-token");
+});
+
+test("managed deletion cannot silently fall back to environment credentials", async () => {
+  const deps = {
+    slackEnvBotToken: "env-token",
+    slackInstallation: {
+      status: async () => ({ configured: false, managed: true }),
+      get: async () => null,
+    },
+  } as any;
+  assert.equal(await briefingBotToken(deps), undefined);
+  deps.slackInstallation.status = async () => ({ configured: false, managed: false });
+  assert.equal(await briefingBotToken(deps), "env-token");
+  deps.slackInstallation.get = async () => {
+    throw new Error("installation read failure");
+  };
+  await assert.rejects(briefingBotToken(deps));
+});
+
+test("a managed deletion between reads never selects the old environment bot", async () => {
+  let deleted = false;
+  const deps = {
+    slackEnvBotToken: "env-token",
+    slackInstallation: {
+      get: async () => {
+        deleted = true;
+        return null;
+      },
+      status: async () => ({ managed: deleted, configured: false }),
+    },
+  } as any;
+  assert.equal(await briefingBotToken(deps), undefined);
+});
+
+test("posting rejects mismatched, foreign or unsuccessful membership responses", async () => {
+  for (const patch of [{ id: "U2" }, { is_stranger: true }, { is_bot: true }, { is_ultra_restricted: true }]) {
+    const f = slackFixture();
+    Object.assign(f.member, patch);
+    await assert.rejects(postBriefingCard(f.client, "reviewer@example.com", INPUT));
+    assert.equal(f.posts.length, 0);
+  }
+  const f = slackFixture();
+  f.client.users.info = async () => ({ ok: false, user: f.member });
+  await assert.rejects(postBriefingCard(f.client, "reviewer@example.com", INPUT));
+  assert.equal(f.posts.length, 0);
 });

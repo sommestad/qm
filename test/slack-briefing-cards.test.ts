@@ -4,7 +4,7 @@ import {
   briefingCardMessage,
   briefingInputFromMessage,
   parseBriefingInput,
-  briefingMarksFromMessage,
+  isBriefingMark,
 } from "../src/slack/briefing-cards.ts";
 import { createBriefingCardActions } from "../src/slack/briefing-card-actions.ts";
 import type { SlackCoreClient } from "../src/api/slack-core-client.ts";
@@ -20,7 +20,15 @@ function fixture() {
   const updates: any[] = [];
   let acked = false;
   const message = { ...briefingCardMessage(input), ts: "100.001", user: "UBOT" };
-  const info = { channel: { is_im: true, user: "U1" } };
+  const member = {
+    id: "U1",
+    team_id: "T1",
+    deleted: false,
+    is_bot: false,
+    is_stranger: false,
+    profile: { email: "reviewer@example.com" },
+  };
+  const info = { ok: true, channel: { is_im: true, user: "U1" } };
   const identity = { ok: true, actor: { externalId: "reviewer@example.com", isBot: false, isExternalGuest: false } };
   const client = {
     conversations: {
@@ -30,6 +38,7 @@ function fixture() {
       },
       replies: async () => ({ messages: [message] }),
     },
+    users: { info: async () => ({ ok: true, user: member }) },
     chat: {
       update: async (p: any) => {
         updates.push(p);
@@ -61,13 +70,27 @@ function fixture() {
     body: { team: { id: "T1" }, user: { id: "U1" }, channel: { id: "D1" }, message: { ts: "100.001", blocks: [] } },
     action: { action_id: "briefing_draft" } as any,
   };
-  return { turns, ephemerals, updates, message, info, identity, deps, click, actions: createBriefingCardActions(deps) };
+  return {
+    member,
+    turns,
+    ephemerals,
+    updates,
+    message,
+    info,
+    identity,
+    deps,
+    click,
+    actions: createBriefingCardActions(deps),
+  };
 }
 
-test("Slack message contains the card and unchecked marks without external storage", () => {
+test("Slack message explains native reactions without custom marks or storage", () => {
   const rendered = briefingCardMessage(input);
   assert.deepEqual(briefingInputFromMessage(rendered), input);
-  assert.deepEqual(briefingMarksFromMessage(rendered), { done: false, important: false, actionTs: "0.000000" });
+  assert.match(rendered.text, /✅ = klar, ⭐ = viktig/);
+  assert.match(rendered.text, /Ta bort din reaktion/);
+  assert.ok(!JSON.stringify(rendered).includes("checkboxes"));
+  assert.ok(!JSON.stringify(rendered).includes("briefing_marks"));
   assert.equal(JSON.stringify(rendered).includes("datepicker"), false);
   assert.ok(JSON.stringify(rendered).includes("briefing_source"));
 });
@@ -151,148 +174,114 @@ test("actor allowlist is enforced", async () => {
   assert.equal(f.turns.length, 0);
 });
 
-function mark(f: ReturnType<typeof fixture>, values: string[], actionTs = "101.000001") {
-  return {
-    ...f.click,
-    action: {
-      action_id: "briefing_marks",
-      type: "checkboxes",
-      action_ts: actionTs,
-      selected_options: values.map((value) => ({ value })),
-    },
-  };
-}
-
-test("done and important persist only on the original Slack message, with text fallback", async () => {
+test("independent callback handlers cannot overwrite Slack reaction marks", async () => {
   const f = fixture();
-  await f.actions.handle(mark(f, ["done", "important"]));
-  assert.equal(f.updates.length, 1);
-  assert.equal(f.updates[0].channel, "D1");
-  assert.equal(f.updates[0].ts, "100.001");
-  assert.deepEqual(briefingMarksFromMessage(f.message), { done: true, important: true, actionTs: "101.000001" });
-  assert.match(f.message.text, /✅ Klar.*⭐ Viktig/);
-  assert.deepEqual(briefingInputFromMessage(f.message), input);
+  const reactions = [
+    { name: "white_check_mark", users: ["U1"] },
+    { name: "star", users: ["U1"] },
+  ];
+  Object.assign(f.message, { reactions });
+  const before = structuredClone(f.message);
+  const handlers = [f.actions, createBriefingCardActions(f.deps)];
+  await Promise.all(handlers.map((h) => h.handle({ ...f.click, action: { action_id: "briefing_marks" } })));
+  assert.equal(f.updates.length, 0);
   assert.equal(f.turns.length, 0);
-  assert.equal(f.ephemerals.length, 0);
+  assert.deepEqual(f.message, before);
+  assert.equal(f.ephemerals.length, 2);
+  assert.ok(f.ephemerals.every((p) => p.text.includes("Slacks reaktioner")));
 });
 
-test("recreated handler restores marks from Slack and can uncheck each independently", async () => {
+test("draft callbacks preserve reaction marks and use one key across handlers", async () => {
   const f = fixture();
-  await f.actions.handle(mark(f, ["done", "important"]));
-  await createBriefingCardActions(f.deps).handle(mark(f, ["important"], "102.000001"));
-  assert.match(f.message.text, /☐ Kvar.*⭐ Viktig/);
-  await createBriefingCardActions(f.deps).handle(mark(f, [], "103.000001"));
-  assert.deepEqual(briefingMarksFromMessage(f.message), { done: false, important: false, actionTs: "103.000001" });
-  const block = f.message.blocks.find((b) => b.block_id?.startsWith("briefing_marks:"));
-  assert.equal("initial_options" in block!.elements![0]!, false);
+  const reactions = [{ name: "star", users: ["U1"] }];
+  Object.assign(f.message, { reactions });
+  const before = structuredClone(f.message);
+  await Promise.all([f.actions.handle(f.click), createBriefingCardActions(f.deps).handle(f.click)]);
+  assert.equal(f.turns.length, 2);
+  assert.equal(new Set(f.turns.map((t) => t.idempotencyKey)).size, 1);
+  assert.deepEqual(f.message, before);
+  assert.equal(f.updates.length, 0);
 });
 
-test("duplicate and out-of-order callbacks never toggle or overwrite a later selection", async () => {
-  const f = fixture();
-  await f.actions.handle(mark(f, ["important"], "103.000001"));
-  await createBriefingCardActions(f.deps).handle(mark(f, ["important"], "103.000001"));
-  await createBriefingCardActions(f.deps).handle(mark(f, ["done"], "102.000001"));
-  assert.equal(f.updates.length, 1);
-  assert.equal(briefingMarksFromMessage(f.message).done, false);
-});
-
-test("rapid selections within one handler serialize and retain the latest full checkbox snapshot", async () => {
-  const f = fixture();
-  await Promise.all([
-    f.actions.handle(mark(f, ["done"], "101.000001")),
-    f.actions.handle(mark(f, ["done", "important"], "101.000002")),
-  ]);
-  assert.deepEqual(briefingMarksFromMessage(f.message), { done: true, important: true, actionTs: "101.000002" });
-});
-
-test("mark callbacks ignore payload message content and do not dispatch drafts", async () => {
-  const f = fixture();
-  f.click.body.message.blocks = [];
-  await f.actions.handle(mark(f, ["done"]));
-  assert.deepEqual(briefingInputFromMessage(f.message), input);
-  await f.actions.handle(f.click);
-  assert.equal(f.turns.length, 1);
-  assert.equal(f.updates.length, 1);
-});
-
-test("invalid mark events fail closed", async () => {
-  for (const action of [
-    { type: "button" },
-    { action_ts: "NaN" },
-    { selected_options: null },
-    { selected_options: [{ value: "other" }] },
-    { selected_options: [{ value: "done" }, { value: "done" }] },
-  ]) {
-    const f = fixture();
-    const click = mark(f, []);
-    Object.assign(click.action, action);
-    await f.actions.handle(click);
-    assert.equal(f.updates.length, 0);
-    assert.equal(f.ephemerals.length, 1);
-  }
-});
-
-test("marks enforce the same identity and ownership boundaries as drafts", async () => {
+test("fresh membership overrides stale directory cache", async () => {
   for (const mutate of [
     (f: ReturnType<typeof fixture>) => {
-      f.click.body.team.id = "T2";
+      f.member.deleted = true;
     },
     (f: ReturnType<typeof fixture>) => {
-      f.info.channel.user = "U2";
+      f.member.is_bot = true;
     },
     (f: ReturnType<typeof fixture>) => {
-      f.info.channel.is_im = false;
+      f.member.is_stranger = true;
     },
     (f: ReturnType<typeof fixture>) => {
-      f.identity.ok = false;
+      f.member.id = "U2";
     },
     (f: ReturnType<typeof fixture>) => {
-      f.identity.actor.isBot = true;
+      f.member.team_id = "T2";
     },
     (f: ReturnType<typeof fixture>) => {
-      f.identity.actor.isExternalGuest = true;
-    },
-    (f: ReturnType<typeof fixture>) => {
-      f.message.user = "OTHERBOT";
-    },
-    (f: ReturnType<typeof fixture>) => {
-      f.message.ts = "other";
+      f.member.profile.email = "other@example.com";
     },
   ]) {
     const f = fixture();
     mutate(f);
-    await f.actions.handle(mark(f, ["done"]));
+    await f.actions.handle(f.click);
+    assert.equal(f.turns.length, 0);
     assert.equal(f.updates.length, 0);
     assert.equal(f.ephemerals.length, 1);
   }
-  const f = fixture();
-  await createBriefingCardActions({ ...f.deps, allowActor: () => false }).handle(mark(f, ["done"]));
-  assert.equal(f.updates.length, 0);
 });
 
-test("ambiguous Slack update can be retried without undoing the successful selection", async () => {
+test("failure feedback does not reject the acknowledged callback", async () => {
   const f = fixture();
-  const update = f.deps.client.chat.update;
-  f.deps.client.chat.update = async (p: any) => {
-    await update(p);
-    throw new Error("transport");
+  f.info.ok = false;
+  f.deps.client.chat.postEphemeral = async () => {
+    throw new Error("Slack unavailable");
   };
-  const click = mark(f, ["done"]);
-  await f.actions.handle(click);
-  assert.equal(f.ephemerals.length, 1);
-  await createBriefingCardActions(f.deps).handle(click);
-  assert.equal(f.updates.length, 1);
-  assert.equal(briefingMarksFromMessage(f.message).done, true);
+  await assert.doesNotReject(f.actions.handle(f.click));
 });
 
-test("unsuccessful Slack update reports no confirmation and releases queue for retry", async () => {
+test("only completion and importance on a valid card are UI-only reactions", () => {
+  for (const emoji of ["star", "white_check_mark"])
+    assert.equal(isBriefingMark(briefingCardMessage(input), emoji), true);
+  assert.equal(isBriefingMark(briefingCardMessage(input), "eyes"), false);
+  assert.equal(isBriefingMark({ blocks: [] }, "star"), false);
+  assert.equal(isBriefingMark({ blocks: {} as any }, "star"), false);
+});
+
+test("draft-only run explicitly discloses it cannot fetch the original source", async () => {
   const f = fixture();
-  const update = f.deps.client.chat.update;
-  f.deps.client.chat.update = async () => ({ ok: false });
-  await f.actions.handle(mark(f, ["done"]));
-  assert.equal(f.ephemerals.length, 1);
-  assert.equal(briefingMarksFromMessage(f.message).done, false);
-  f.deps.client.chat.update = update;
-  await f.actions.handle(mark(f, ["done"]));
-  assert.equal(briefingMarksFromMessage(f.message).done, true);
+  await f.actions.handle(f.click);
+  assert.match(f.turns[0].text, /inte läst originalkällan på nytt/);
+  assert.match(f.turns[0].gatewayContext.instructions, /Source access is unavailable/);
+  assert.equal(f.turns[0].liveActor, false);
+  assert.equal(f.turns[0].readOnly, true);
+});
+
+test("concurrent draft callbacks collapse onto one real core run", async () => {
+  await import("./support/auto-fake-sprites.ts");
+  const { buildApp } = await import("../src/wiring.ts");
+  const { testConfig } = await import("./support/test-config.ts");
+  const built = buildApp(testConfig());
+  const f = fixture();
+  const receipts: any[] = [];
+  f.deps.core.submitTurn = async (body) => {
+    const result = await built.slackCore.submitTurn(body);
+    receipts.push(result);
+    return result;
+  };
+  try {
+    await Promise.all([f.actions.handle(f.click), createBriefingCardActions(f.deps).handle(f.click)]);
+    assert.equal(receipts.length, 2);
+    const run = await built.runs.getByDedupKey("briefing-draft:T1:D1:100.001");
+    assert.ok(run);
+    assert.equal(run.request.readOnly, true);
+    assert.deepEqual(run.request.origin, { kind: "direct" });
+    assert.equal(run.request.deliveryTarget, "D1:100.001");
+    assert.equal(f.ephemerals.length, 0);
+    assert.ok(receipts.every((r) => r.status === "queued" && r.runId === run.id));
+  } finally {
+    await built.runtime.stop();
+  }
 });

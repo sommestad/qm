@@ -1,3 +1,4 @@
+import { isBriefingMark } from "./briefing-cards.ts";
 import { performance } from "node:perf_hooks";
 import { slackFailureText } from "./turn-flow.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
@@ -781,7 +782,11 @@ export function createTurnHandler(deps: {
     channel: string,
     ts: string,
     full: boolean,
-  ): Promise<{ text: string; threadTs?: string; reactions: ReactionTally[]; authorId?: string } | undefined> {
+    emoji: string,
+  ): Promise<
+    | { text: string; threadTs?: string; reactions: ReactionTally[]; authorId?: string; briefingMark: boolean }
+    | undefined
+  > {
     try {
       const res = await client.reactions.get({ channel, timestamp: ts, full });
       const m = res?.message;
@@ -790,6 +795,7 @@ export function createTurnHandler(deps: {
         text: decodeSlackEntities(String(m.text ?? "").trim()),
         ...(m.thread_ts && m.thread_ts !== ts ? { threadTs: String(m.thread_ts) } : {}),
         reactions: reactionTallies(m.reactions),
+        briefingMark: isBriefingMark(m, emoji),
         ...(m.user ? { authorId: String(m.user) } : {}),
       };
     } catch {
@@ -858,7 +864,10 @@ export function createTurnHandler(deps: {
           }
           const reactorName = reactor.displayName || "Someone";
 
-          const msg = await getReactedMessage(client, channel, messageTs, added);
+          const msg = await getReactedMessage(client, channel, messageTs, added, emoji);
+          if (isDM && onBotMessage && (emoji === "white_check_mark" || emoji === "star")) {
+            if (!msg || (msg.authorId === ids.botUserId && msg.briefingMark)) return;
+          }
           let authorName: string | undefined;
           if (!onBotMessage && msg?.authorId && msg.authorId !== reactorId) {
             authorName = (await classifyActor(client, msg.authorId)).displayName;

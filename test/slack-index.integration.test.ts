@@ -46,13 +46,13 @@ class FakeSlackClient {
   };
   readonly emoji = { list: async () => ({ emoji: {} }) };
   readonly users = {
-    info: async ({ user }: { user: string }) => ({ user: this.usersById.get(user) }),
+    info: async ({ user }: { user: string }) => ({ ok: true, user: this.usersById.get(user) }),
     lookupByEmail: async ({ email }: { email: string }) => ({
       user: [...this.usersById.values()].find((u) => u.profile?.email === email),
     }),
   };
   readonly conversations = {
-    info: async ({ channel }: { channel: string }) => ({ channel: this.channelsById.get(channel) }),
+    info: async ({ channel }: { channel: string }) => ({ ok: true, channel: this.channelsById.get(channel) }),
     replies: async ({ channel, ts }: { channel: string; ts: string }) => ({
       messages: (this.messagesByChannel.get(channel) ?? []).filter((m) => m.ts === ts || m.thread_ts === ts),
       has_more: false,
@@ -117,7 +117,10 @@ class FakeSlackClient {
       this.reactionsRemoved.push(body);
       return { ok: true };
     },
-    get: async () => ({}),
+    get: async ({ channel, timestamp }: { channel: string; timestamp: string }) => ({
+      ok: true,
+      message: (this.messagesByChannel.get(channel) ?? []).find((m) => m.ts === timestamp),
+    }),
   };
   readonly filesById = new Map<string, any>();
   readonly fileInfoCalls: string[] = [];
@@ -1720,7 +1723,7 @@ test("briefing draft action works without a card store or singleton sweeper", as
   }
 });
 
-test("briefing mark action updates the same Slack DM message without a core turn", async () => {
+test("legacy briefing checkboxes explain native reactions without rewriting the message", async () => {
   const { briefingCardMessage } = await import("../src/slack/briefing-cards.ts");
   const f = await fixture({ coreSingleton: false });
   try {
@@ -1749,9 +1752,55 @@ test("briefing mark action updates the same Slack DM message without a core turn
     });
     assert.equal(acked, true);
     assert.equal(f.core.turns.length, 0);
-    assert.equal(f.client.updates.length, 1);
-    assert.equal(f.client.updates[0].ts, "100.001");
-    assert.match(f.client.updates[0].text, /✅ Klar.*⭐ Viktig/);
+    assert.equal(f.client.updates.length, 0);
+    assert.match(f.client.ephemerals.at(-1)!.text, /Slacks reaktioner/);
+  } finally {
+    await f.stop();
+  }
+});
+
+test("native briefing marks never start an agent turn or enter conversation history", async () => {
+  const { briefingCardMessage } = await import("../src/slack/briefing-cards.ts");
+  const f = await fixture();
+  try {
+    f.client.channelsById.set("D1", { id: "D1", is_im: true, user: "U1" });
+    f.client.messagesByChannel.set("D1", [
+      {
+        ...briefingCardMessage({ title: "Review", summary: "Read source", sourceUrl: "https://example.com/source" }),
+        user: "UBOT",
+        ts: "100.001",
+      },
+    ]);
+    const event = { user: "U1", item_user: "UBOT", item: { type: "message", channel: "D1", ts: "100.001" } };
+    for (const reaction of ["white_check_mark", "star"]) {
+      await f.app.emitEvent("reaction_added", { ...event, reaction });
+      await f.app.emitEvent("reaction_removed", { ...event, reaction });
+    }
+    assert.equal(f.core.turns.length, 0);
+    assert.deepEqual(f.core.ingests, []);
+    assert.equal(f.client.updates.length, 0);
+    assert.equal(f.client.posts.length, 0);
+  } finally {
+    await f.stop();
+  }
+});
+
+test("marks fail closed on an unreadable DM bot message but ordinary messages still dispatch", async () => {
+  const f = await fixture();
+  try {
+    f.client.channelsById.set("D1", { id: "D1", is_im: true, user: "U1" });
+    const event = {
+      user: "U1",
+      item_user: "UBOT",
+      item: { type: "message", channel: "D1", ts: "100.001" },
+      reaction: "star",
+    };
+    await f.app.emitEvent("reaction_added", { ...event, event_ts: "101.001" });
+    assert.equal(f.core.turns.length, 0);
+    f.client.messagesByChannel.set("D1", [{ user: "UBOT", ts: "100.001", text: "ordinary reply" }]);
+    await f.app.emitEvent("reaction_added", { ...event, event_ts: "102.001" });
+    assert.equal(f.core.turns.length, 1);
+    assert.match(f.core.turns[0].text, /ordinary reply/);
   } finally {
     await f.stop();
   }

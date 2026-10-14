@@ -18,69 +18,15 @@ export function parseBriefingInput(body: unknown): BriefingInput {
   return { title: text(b.title, 150), summary: text(b.summary, 1800), sourceUrl: url.href };
 }
 
-export interface BriefingMarks {
-  done: boolean;
-  important: boolean;
-  actionTs: string;
-}
-
-const markOptions = [
-  { text: { type: "plain_text", text: "Klar" }, value: "done" },
-  { text: { type: "plain_text", text: "Viktig" }, value: "important" },
-];
-
-export function briefingMarksFromMessage(message: { blocks?: any[] }): BriefingMarks {
-  const block = message.blocks?.find((b) => b.block_id?.startsWith("briefing_marks:"));
-  const selected = block?.elements?.find((e: any) => e.action_id === "briefing_marks")?.initial_options ?? [];
-  return {
-    done: selected.some((o: any) => o.value === "done"),
-    important: selected.some((o: any) => o.value === "important"),
-    actionTs: block?.block_id.slice("briefing_marks:".length) ?? "0.000000",
-  };
-}
-
-export function parseBriefingMarksAction(action: any): BriefingMarks {
-  if (
-    action.type !== "checkboxes" ||
-    !/^\d{1,16}\.\d{6}$/.test(action.action_ts ?? "") ||
-    !Array.isArray(action.selected_options) ||
-    action.selected_options.length > 2 ||
-    action.selected_options.some((o: any) => !o || !["done", "important"].includes(o.value)) ||
-    new Set(action.selected_options.map((o: any) => o.value)).size !== action.selected_options.length
-  )
-    throw new Error("invalid marks");
-  return {
-    done: action.selected_options.some((o: any) => o.value === "done"),
-    important: action.selected_options.some((o: any) => o.value === "important"),
-    actionTs: action.action_ts,
-  };
-}
-
-export function briefingCardMessage(
-  input: BriefingInput,
-  marks: BriefingMarks = { done: false, important: false, actionTs: "0.000000" },
-) {
+export function briefingCardMessage(input: BriefingInput) {
   const card = parseBriefingInput(input);
-  const status = `${marks.done ? "✅ Klar" : "☐ Kvar"}${marks.important ? " · ⭐ Viktig" : ""}`;
-  const selected = markOptions.filter((o) => (o.value === "done" ? marks.done : marks.important));
+  const help =
+    "Markera med Slacks reaktioner: ✅ = klar, ⭐ = viktig. Ta bort din reaktion för att ångra. Markeringarna gäller bara i Slack. Utkast bygger på kortets underlag, inte en ny läsning av källan. Svara i tråden för att diskutera.";
   return {
-    text: `${status}\n${card.title}\n${card.summary}\n${card.sourceUrl}\nSvara i tråden för att diskutera.`,
+    text: `${card.title}\n${card.summary}\n${card.sourceUrl}\n${help}`,
     blocks: [
       { type: "header", block_id: "briefing_title", text: { type: "plain_text", text: card.title } },
       { type: "section", block_id: "briefing_summary", text: { type: "plain_text", text: card.summary } },
-      { type: "context", block_id: "briefing_status", elements: [{ type: "plain_text", text: status }] },
-      {
-        type: "actions",
-        block_id: `briefing_marks:${marks.actionTs}`,
-        elements: [
-          {
-            type: "checkboxes",
-            action_id: "briefing_marks",
-            options: markOptions,
-            ...(selected.length ? { initial_options: selected } : {}),
-          },
-        ],
-      },
       {
         type: "actions",
         block_id: "briefing_actions",
@@ -99,15 +45,7 @@ export function briefingCardMessage(
           },
         ],
       },
-      {
-        type: "context",
-        elements: [
-          {
-            type: "plain_text",
-            text: "Markeringarna gäller bara här i Slack. Svara i tråden för att diskutera. Morgondagens brief läser källorna på nytt.",
-          },
-        ],
-      },
+      { type: "context", elements: [{ type: "plain_text", text: help }] },
     ],
   };
 }
@@ -129,4 +67,14 @@ export function briefingInputFromMessage(message: { blocks?: any[] }): BriefingI
     summary: summary.text,
     sourceUrl: actions.find((a) => a.action_id === "briefing_source")?.url,
   });
+}
+
+export function isBriefingMark(message: { blocks?: any[] }, emoji: string): boolean {
+  if (emoji !== "white_check_mark" && emoji !== "star") return false;
+  try {
+    briefingInputFromMessage(message);
+    return true;
+  } catch {
+    return false;
+  }
 }
